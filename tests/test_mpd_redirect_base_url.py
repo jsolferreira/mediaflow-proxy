@@ -6,24 +6,31 @@ from mediaflow_proxy.utils import cache_utils, http_utils, mpd_utils
 
 
 class FakeResponse:
+    """Minimal stand-in for an aiohttp response, exposing only `.url` and `.read()`."""
+
     def __init__(self, content: bytes, url: str):
+        """Store the body and the (possibly redirected) final URL."""
         self._content = content
         self.url = url
 
     async def read(self) -> bytes:
+        """Return the canned response body."""
         return self._content
 
 
 @pytest.mark.asyncio
 async def test_download_file_with_retry_returns_final_redirected_url(monkeypatch):
+    """With return_url=True, the final (redirected) URL is returned alongside the content."""
     original_url = "https://tv.example.com/proxy/vtmgo/resolve/abc.mpd"
     final_url = "https://live-video.dpgmedia.net/v1/dash/xyz/index.mpd?aws.sessionId=abc"
 
     @asynccontextmanager
     async def fake_session(*args, **kwargs):
+        """Fake replacement for create_aiohttp_session."""
         yield object(), None
 
     async def fake_fetch_with_retry(session, method, url, headers, proxy=None, **kwargs):
+        """Fake replacement for fetch_with_retry that simulates a redirect."""
         assert url == original_url
         return FakeResponse(b"<MPD/>", final_url)
 
@@ -38,11 +45,15 @@ async def test_download_file_with_retry_returns_final_redirected_url(monkeypatch
 
 @pytest.mark.asyncio
 async def test_download_file_with_retry_without_return_url_flag_returns_bytes_only(monkeypatch):
+    """Without return_url, the call keeps its original bytes-only return type."""
+
     @asynccontextmanager
     async def fake_session(*args, **kwargs):
+        """Fake replacement for create_aiohttp_session."""
         yield object(), None
 
     async def fake_fetch_with_retry(session, method, url, headers, proxy=None, **kwargs):
+        """Fake replacement for fetch_with_retry."""
         return FakeResponse(b"data", "https://redirected.example.com/index.mpd")
 
     monkeypatch.setattr(http_utils, "create_aiohttp_session", fake_session)
@@ -55,26 +66,32 @@ async def test_download_file_with_retry_without_return_url_flag_returns_bytes_on
 
 @pytest.mark.asyncio
 async def test_get_cached_mpd_parses_against_redirected_url_on_cache_miss(monkeypatch):
+    """On a cache miss, the manifest is parsed against the redirected download URL."""
     original_url = "https://tv.example.com/proxy/vtmgo/resolve/abc.mpd"
     redirected_url = "https://live-video.dpgmedia.net/v1/dash/xyz/index.mpd?aws.sessionId=abc"
 
     async def fake_redis_get_cached_mpd(key):
+        """Simulate a cache miss."""
         return None
 
     async def fake_redis_set_cached_mpd(key, data, ttl=None):
-        pass
+        """Replacement for the cache write that records the payload for inspection."""
+        captured["set_cached_mpd_data"] = data
 
     async def fake_download_file_with_retry(url, headers, return_url=False, **kwargs):
+        """Simulate a download that got redirected to a different URL."""
         assert url == original_url
         assert return_url is True
         return b"<MPD/>", redirected_url
 
     def fake_parse_mpd(content):
+        """Fake replacement for parse_mpd."""
         return {"MPD": {}}
 
     captured = {}
 
     def fake_parse_mpd_dict(mpd_dict, mpd_url, parse_drm, parse_segment_profile_id=None):
+        """Fake replacement for parse_mpd_dict that records the URL it was called with."""
         captured["mpd_url"] = mpd_url
         return {"profiles": [], "drmInfo": {}}
 
@@ -87,9 +104,11 @@ async def test_get_cached_mpd_parses_against_redirected_url_on_cache_miss(monkey
     await cache_utils.get_cached_mpd(original_url, headers={}, parse_drm=True)
 
     assert captured["mpd_url"] == redirected_url
+    assert captured["set_cached_mpd_data"]["resolved_url"] == redirected_url
 
 
 def test_resolve_url_resolves_relative_path_against_redirected_base():
+    """A relative path resolves against the base URL's directory."""
     base_url = "https://live-video.dpgmedia.net/v1/dash/xyz/index.mpd"
 
     resolved = mpd_utils.resolve_url(base_url, "chunk-stream0-00001.m4s")
@@ -98,6 +117,7 @@ def test_resolve_url_resolves_relative_path_against_redirected_base():
 
 
 def test_resolve_url_resolves_absolute_path_against_redirected_origin():
+    """An absolute path resolves against the base URL's origin (scheme + host)."""
     base_url = "https://live-video.dpgmedia.net/v1/dash/xyz/index.mpd"
 
     resolved = mpd_utils.resolve_url(base_url, "/v1/dash/xyz/chunk-stream0-00001.m4s")
@@ -106,6 +126,7 @@ def test_resolve_url_resolves_absolute_path_against_redirected_origin():
 
 
 def test_resolve_url_leaves_absolute_urls_untouched():
+    """An already-absolute URL is returned unchanged, ignoring the base URL."""
     base_url = "https://live-video.dpgmedia.net/v1/dash/xyz/index.mpd"
 
     resolved = mpd_utils.resolve_url(base_url, "https://cdn.other.example.com/seg.m4s")
@@ -142,22 +163,26 @@ async def test_get_cached_mpd_falls_back_to_redownload_on_legacy_cache_format(mo
     redirected_url = "https://live-video.dpgmedia.net/v1/dash/xyz/index.mpd?aws.sessionId=abc"
 
     async def fake_redis_get_cached_mpd(key):
-        # legacy format: raw xmltodict dict, not wrapped in {"mpd_dict": ..., "resolved_url": ...}
+        """Simulate a legacy cache entry: raw xmltodict dict, no wrapper."""
         return {"MPD": {}}
 
     async def fake_redis_set_cached_mpd(key, data, ttl=None):
+        """No-op replacement for the cache write."""
         pass
 
     async def fake_download_file_with_retry(url, headers, return_url=False, **kwargs):
+        """Simulate a download that got redirected to a different URL."""
         assert return_url is True
         return b"<MPD/>", redirected_url
 
     def fake_parse_mpd(content):
+        """Fake replacement for parse_mpd."""
         return {"MPD": {}}
 
     captured = {}
 
     def fake_parse_mpd_dict(mpd_dict, mpd_url, parse_drm, parse_segment_profile_id=None):
+        """Fake replacement for parse_mpd_dict that records the URL it was called with."""
         captured["mpd_url"] = mpd_url
         return {"profiles": [], "drmInfo": {}}
 
@@ -174,18 +199,22 @@ async def test_get_cached_mpd_falls_back_to_redownload_on_legacy_cache_format(mo
 
 @pytest.mark.asyncio
 async def test_get_cached_mpd_parses_against_stored_resolved_url_on_cache_hit(monkeypatch):
+    """On a cache hit, the manifest is parsed against the stored resolved_url, not re-downloaded."""
     original_url = "https://tv.example.com/proxy/vtmgo/resolve/abc.mpd"
     redirected_url = "https://live-video.dpgmedia.net/v1/dash/xyz/index.mpd?aws.sessionId=abc"
 
     async def fake_redis_get_cached_mpd(key):
+        """Simulate a cache hit with the new wrapped format."""
         return {"mpd_dict": {"MPD": {}}, "resolved_url": redirected_url}
 
     async def fake_download_file_with_retry(*args, **kwargs):
+        """Fail the test if a re-download is attempted on a cache hit."""
         raise AssertionError("should not re-download on cache hit")
 
     captured = {}
 
     def fake_parse_mpd_dict(mpd_dict, mpd_url, parse_drm, parse_segment_profile_id=None):
+        """Fake replacement for parse_mpd_dict that records the URL it was called with."""
         captured["mpd_url"] = mpd_url
         return {"profiles": [], "drmInfo": {}}
 
